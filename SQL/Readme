@@ -1,0 +1,198 @@
+
+## Project name
+
+**Marketing Analytics — SQL artifacts**
+
+## Overview
+
+This README documents the SQL assets, database restore steps, data cleaning and transformation logic, and recommended workflow for the Marketing Analytics project. The SQL codebase contains dimension and fact table definitions, data-cleaning queries, and analytical SQL used to prepare data for downstream ML and visualization (Python sentiment pipeline and BI dashboards).
+
+---
+
+## Files included (SQL & DB backup)
+
+* `PortfolioProject_MarketingAnalytics.bak` — Full database backup (restore in SQL Server).
+* `dim_customers.sql` — Customer dimension (includes geography join examples).
+* `dim_products.sql` — Product dimension and price-category logic.
+* `fact_customer_journey.sql` — Customer journey fact table: de-duplication & standardization CTEs.
+* `fact_customer_reviews.sql` — Reviews fact table; text cleaning steps.
+* `fact_engagement_data.sql` — Engagement fact table cleaning and parsing steps.
+
+> All SQL files are written to be run in Microsoft SQL Server / SSMS (T-SQL).
+
+---
+
+## Prerequisites
+
+* Microsoft SQL Server (2016 or later recommended)
+* SQL Server Management Studio (SSMS)
+* Sufficient disk space for restoring the `.bak` file
+* Proper permissions to create/restore databases on the SQL Server instance
+
+---
+
+## Restoring the database from the .bak file
+
+1. Copy `PortfolioProject_MarketingAnalytics.bak` to the SQL Server machine (or a location accessible by SQL Server).
+2. Open SSMS and connect to your SQL Server instance.
+3. Right-click **Databases** → **Restore Database...**
+4. Choose **Device** → **Add** → select the `.bak` file.
+5. Specify the target database name (e.g., `PortfolioProject_MarketingAnalytics`).
+6. In **Files** tab, confirm logical file paths and adjust if necessary.
+7. Click **OK** to start the restore. Monitor the Messages pane for completion.
+
+*TIP:* If you prefer T-SQL, use a RESTORE DATABASE command and update file paths accordingly:
+
+```sql
+RESTORE DATABASE PortfolioProject_MarketingAnalytics
+FROM DISK = N'C:\path\to\PortfolioProject_MarketingAnalytics.bak'
+WITH MOVE 'LogicalDataFileName' TO 'C:\path\to\MDFfile.mdf',
+     MOVE 'LogicalLogFileName'  TO 'C:\path\to\LDFfile.ldf',
+     REPLACE;
+```
+
+---
+
+## Schema & Key tables (conceptual)
+
+* **Dim tables**
+
+  * `dim_customers` — Customer attributes (CustomerID, Name, Email, Gender, Age, GeographyID).
+  * `dim_products` — Product attributes (ProductID, Name, Category, Price, PriceCategory).
+  * `dim_geography` — Geography lookup table (GeographyID, Country, City, Region).
+
+* **Fact tables**
+
+  * `fact_customer_journey` — JourneyID, CustomerID, ProductID, VisitDate, Stage, Action, Duration.
+  * `fact_customer_reviews` — ReviewID, CustomerID, ProductID, ReviewDate, Rating, ReviewText.
+  * `fact_engagement_data` — EngagementID, ContentID, CampaignID, ProductID, ContentType, Views, Clicks, Likes, EngagementDate.
+
+---
+
+## Data cleaning & transformation (what each SQL file does)
+
+* **Customer enrichment** (`dim_customers.sql`)
+
+  * Join `dim_customers` with `dim_geography` to add `Country` and `City` fields to customer records.
+  * Normalize email and string fields if necessary.
+
+* **Product bucketing** (`dim_products.sql`)
+
+  * Add a `PriceCategory` column using a `CASE` expression (Low / Medium / High).
+
+* **Customer journey cleaning** (`fact_customer_journey.sql`)
+
+  * Identify and remove duplicate rows using `ROW_NUMBER()` over partitions.
+  * Standardize `Stage` values using `UPPER()` and normalize `Action` values.
+  * Impute missing `Duration` with date-level averages using window functions.
+
+* **Review text cleaning** (`fact_customer_reviews.sql`)
+
+  * Normalizes `ReviewText` (remove double spaces, trim whitespace) to improve NLP results.
+
+* **Engagement parsing** (`fact_engagement_data.sql`)
+
+  * Normalize `ContentType` values (e.g., `Socialmedia` → `Social Media`, then uppercase).
+  * Split `ViewsClicksCombined` into `Views` and `Clicks` using `CHARINDEX`/`LEFT`/`RIGHT`.
+  * Filter out irrelevant content types (e.g., `Newsletter`) and format dates.
+
+---
+
+## Example queries & analytics snippets
+
+> These are starter queries you can run in SSMS to validate or explore data.
+
+**1) Basic customer enrichment join**
+
+```sql
+USE PortfolioProject_MarketingAnalytics;
+SELECT c.CustomerID, c.CustomerName, c.Email, c.Gender, c.Age,
+       g.Country, g.City
+FROM dbo.customers c
+LEFT JOIN dbo.geography g
+  ON c.GeographyID = g.GeographyID;
+```
+
+**2) Product price category**
+
+```sql
+SELECT ProductID, ProductName, Price,
+  CASE WHEN Price < 50 THEN 'Low'
+       WHEN Price BETWEEN 50 AND 200 THEN 'Medium'
+       ELSE 'High' END AS PriceCategory
+FROM dbo.products;
+```
+
+**3) Find duplicate customer_journey records**
+
+```sql
+WITH DuplicateRecords AS (
+  SELECT *,
+    ROW_NUMBER() OVER (PARTITION BY CustomerID, ProductID, VisitDate, Stage, Action
+                       ORDER BY JourneyID) AS row_num
+  FROM dbo.customer_journey
+)
+SELECT * FROM DuplicateRecords WHERE row_num > 1;
+```
+
+**4) Clean review text (example)**
+
+```sql
+SELECT ReviewID, CustomerID, ProductID, ReviewDate, Rating,
+       REPLACE(ReviewText, '  ', ' ') AS ReviewText
+FROM dbo.customer_reviews;
+```
+
+**5) Parse engagement metrics**
+
+```sql
+SELECT EngagementID, ContentID, CampaignID, ProductID,
+       UPPER(REPLACE(ContentType, 'Socialmedia', 'Social Media')) AS ContentType,
+       LEFT(ViewsClicksCombined, CHARINDEX('-', ViewsClicksCombined) - 1) AS Views,
+       RIGHT(ViewsClicksCombined, LEN(ViewsClicksCombined) - CHARINDEX('-', ViewsClicksCombined)) AS Clicks,
+       Likes,
+       FORMAT(CONVERT(DATE, EngagementDate), 'dd.MM.yyyy') AS EngagementDate
+FROM dbo.engagement_data
+WHERE ContentType != 'Newsletter';
+```
+
+---
+
+## Integration with Python (notes)
+
+* The Python sentiment pipeline reads `fact_customer_reviews` after cleaning.
+* Use SQLAlchemy + pyodbc to connect; the project includes a sample Python script for this (sentiment extraction, bucketing and CSV export).
+* Ensure the SQL Server connection string and driver are correct for your environment.
+
+---
+
+## Best practices & tips
+
+* Always run data-modification scripts (INSERT / UPDATE / DELETE) inside transactions and test on a copy of the DB first.
+* Create indexes on join/filter keys (CustomerID, ProductID, ReviewDate) for better performance.
+* Use views for commonly-used transforms so BI tools can query pre-cleaned data.
+* Document any schema changes and keep SQL scripts under version control.
+
+---
+
+## Troubleshooting
+
+* **Restore failures:** Check file paths, SQL Server service account permissions, and ensure there is no active connection to the DB being replaced.
+* **Driver / connection errors from Python:** Verify ODBC driver version and that the driver name matches the connection string.
+* **String parsing errors:** When splitting strings using `CHARINDEX`, validate edge cases (missing delimiter) using `CASE` or `NULLIF`.
+
+---
+
+## Next steps (suggested)
+
+1. Create materialized views for final reporting tables used by Power BI/Tableau.
+2. Add unit tests for SQL transforms (small sample tables + expected results).
+3. Automate daily refresh jobs using SQL Agent or an orchestration tool.
+
+---
+
+## Contact
+
+For questions about SQL scripts or to request additional analytical queries, contact the project owner or code maintainer.
+
+*End of README*
